@@ -1,0 +1,1886 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Flappy Kiro</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+
+    body {
+      background: #020818;
+      display: flex;
+      justify-content: center;
+      align-items: center;
+      height: 100vh;
+      overflow: hidden;
+      font-family: 'Georgia', serif;
+    }
+
+    canvas {
+      display: block;
+      box-shadow: 0 0 40px rgba(60, 100, 220, 0.7);
+    }
+  </style>
+</head>
+<body>
+<canvas id="gameCanvas" width="480" height="640"></canvas>
+
+<script>
+/* ================================================================
+   FLAPPY KIRO  –  Fase 3: Pulido
+   Secciones:
+     1.  Constantes y configuración
+     2.  Estado del juego
+     3.  Entidades
+     4.  Sonido  (Web Audio API — sin archivos externos)
+     5.  Parallax (capas de fondo animadas)
+     6.  Física
+     7.  Spawning de coleccionables
+     8.  Colisiones
+     9.  Feedback visual
+     10. Entrada del usuario
+     11. Renderizado
+     12. Game Loop
+     13. Inicialización
+   ================================================================ */
+
+
+/* ────────────────────────────────────────────────────────────────
+   1. CONSTANTES Y CONFIGURACIÓN
+   ──────────────────────────────────────────────────────────────── */
+const CONFIG = {
+  WIDTH:  480,
+  HEIGHT: 640,
+
+  // Física
+  GRAVITY:      0.30,
+  JUMP_FORCE:  -7.5,
+  MAX_FALL:     9,
+
+  // Pilares
+  PILLAR_WIDTH:    64,
+  PILLAR_GAP:     210,
+  PILLAR_SPEED:    2.0,
+  PILLAR_INTERVAL: 150,
+  SPEED_INCREMENT:  0,
+
+  // Jugador
+  PLAYER_X:  100,
+  PLAYER_W:   32,
+  PLAYER_H:   38,
+
+  // Suelo
+  GROUND_H: 60,
+
+  // Sistema de vidas e ítems
+  MAX_LIVES:     3,
+  HERBS_TO_WIN:  10,
+  INVULN_FRAMES: 90,
+  ITEM_RADIUS:   10,
+  HERB_CHANCE:   0.65,
+  POISON_CHANCE: 0.25,
+
+  // ── NUEVO Fase 3 ──
+  // Velocidades de cada capa parallax (px/frame)
+  // Capa 0 (lejana) va más lento, capa 2 (cercana) más rápido
+  PARALLAX_SPEEDS: [0.3, 0.8, 1.4],
+
+  // Clave de localStorage para el récord
+  RECORD_KEY: 'flappyKiro_record',
+
+  // Paleta de colores
+  COL: {
+    SKY_TOP:     '#020818',
+    SKY_BOT:     '#0a1a4a',
+    GROUND_TOP:  '#0d1f3c',
+    GROUND_BOT:  '#060e20',
+    PILLAR_CAP:  '#3a6fba',
+    PLAYER_BODY: '#f5c87a',
+    PLAYER_HEAD: '#f0a060',
+    PLAYER_HAIR: '#1a3a2a',
+    BALLOON:     '#e05050',
+    BALLOON_STR: '#3a6fba',
+    HUD_TEXT:    '#e8f0ff',
+    HUD_SHADOW:  '#061030',
+    OVERLAY_BG:  'rgba(2,8,24,0.80)',
+    HERB:        '#4caf50',
+    HERB_STEM:   '#2e7d32',
+    POISON:      '#7b1fa2',
+    LIFE_FULL:   '#e53935',
+    LIFE_EMPTY:  '#1a2a4a',
+    DAMAGE_FLASH:'rgba(200,0,0,0.35)',
+    HERB_FLASH:  'rgba(76,175,80,0.25)',
+    // ── Parallax ──
+    // Capa 0: montañas/tejados lejanos
+    PX0_ROOF:    '#0a1530',
+    PX0_RIDGE:   '#1a3060',
+    // Capa 1: silueta del palacio medio
+    PX1_WALL:    '#0d1e40',
+    PX1_TILE:    '#1a3870',
+    PX1_LANTERN: '#4488dd',
+    // Capa 2: jardín/bambú cercano
+    PX2_BAMBOO:  '#0d2a18',
+    PX2_LEAF:    '#1a4828',
+  },
+};
+
+
+/* ────────────────────────────────────────────────────────────────
+   2. ESTADO DEL JUEGO
+   ──────────────────────────────────────────────────────────────── */
+const state = {
+  phase:      'idle',
+  score:      0,
+  speed:      CONFIG.PILLAR_SPEED,
+  frameCount: 0,
+  lives:      CONFIG.MAX_LIVES,
+  herbs:      0,
+  invuln:     0,
+
+  // ── NUEVO Fase 3 ──
+  record:     0,          // récord cargado de localStorage al inicio
+  newRecord:  false,      // true si esta partida batió el récord
+};
+
+
+/* ────────────────────────────────────────────────────────────────
+   3. ENTIDADES
+   ──────────────────────────────────────────────────────────────── */
+
+const player = {
+  x: CONFIG.PLAYER_X,
+  y: CONFIG.HEIGHT / 2 - CONFIG.PLAYER_H / 2,
+  w: CONFIG.PLAYER_W,
+  h: CONFIG.PLAYER_H,
+  vy: 0,
+  wobble: 0,
+};
+
+let pillarList    = [];
+let itemList      = [];
+let floatingTexts = [];
+let screenFlash   = null;
+
+/**
+ * ── NUEVO Fase 3 ──
+ * Capas parallax: cada capa tiene un offset X que se va moviendo.
+ * Cada capa almacena sus elementos decorativos generados
+ * proceduralmente una sola vez para que sean consistentes.
+ */
+const parallaxLayers = [
+  { offset: 0, elements: [] },   // capa 0 — lejana (tejados/montañas)
+  { offset: 0, elements: [] },   // capa 1 — media  (palacio/linternas)
+  { offset: 0, elements: [] },   // capa 2 — cercana (bambú/jardín)
+];
+
+
+/* ────────────────────────────────────────────────────────────────
+   4. SONIDO  (Web Audio API)
+   Todos los sonidos se sintetizan en tiempo real usando osciladores
+   y nodos de ganancia.  No se carga ningún archivo de audio.
+
+   AudioContext se crea la primera vez que el usuario interactúa
+   (política de autoplay de los navegadores modernos).
+   ──────────────────────────────────────────────────────────────── */
+
+let audioCtx = null;
+
+/** Inicializa (o reutiliza) el AudioContext tras gesto del usuario */
+function getAudioCtx() {
+  if (!audioCtx) {
+    audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+  }
+  // Algunos navegadores suspenden el contexto; reanudarlo si hace falta
+  if (audioCtx.state === 'suspended') audioCtx.resume();
+  return audioCtx;
+}
+
+/**
+ * Genera un tono simple usando un oscilador.
+ * @param {number} freq      - frecuencia en Hz
+ * @param {string} type      - 'sine' | 'square' | 'triangle' | 'sawtooth'
+ * @param {number} duration  - duración en segundos
+ * @param {number} volume    - ganancia 0-1
+ * @param {number} [freqEnd] - frecuencia final (para glide/sweep)
+ */
+function playTone(freq, waveType, duration, volume, freqEnd) {
+  try {
+    const actx = getAudioCtx();
+    const osc  = actx.createOscillator();
+    const gain = actx.createGain();
+
+    osc.connect(gain);
+    gain.connect(actx.destination);
+
+    osc.type = waveType;
+    osc.frequency.setValueAtTime(freq, actx.currentTime);
+    if (freqEnd !== undefined) {
+      osc.frequency.linearRampToValueAtTime(freqEnd, actx.currentTime + duration);
+    }
+
+    gain.gain.setValueAtTime(volume, actx.currentTime);
+    gain.gain.exponentialRampToValueAtTime(0.001, actx.currentTime + duration);
+
+    osc.start(actx.currentTime);
+    osc.stop(actx.currentTime + duration);
+  } catch (e) {
+    // AudioContext no disponible o suspendido
+  }
+}
+
+/** Sonido de salto: chirp ascendente corto */
+function soundJump() {
+  playTone(320, 'sine', 0.12, 0.18, 520);
+}
+
+/** Sonido de recoger hierba: dos notas alegres */
+function soundHerb() {
+  playTone(520, 'sine', 0.10, 0.20);
+  setTimeout(() => playTone(780, 'sine', 0.12, 0.18), 80);
+}
+
+/** Sonido de veneno/daño: descenso brusco */
+function soundDamage() {
+  playTone(300, 'square', 0.18, 0.22, 80);
+}
+
+/** Sonido de victoria: fanfarria de 4 notas */
+function soundWin() {
+  const notes = [523, 659, 784, 1047];   // C5 E5 G5 C6
+  notes.forEach((f, i) => {
+    setTimeout(() => playTone(f, 'triangle', 0.25, 0.25), i * 120);
+  });
+}
+
+/** Sonido de game over: tres golpes descendentes */
+function soundDead() {
+  [220, 180, 140].forEach((f, i) => {
+    setTimeout(() => playTone(f, 'square', 0.20, 0.28), i * 180);
+  });
+}
+
+/** Sonido de pasar un pilar: tick discreto */
+function soundScore() {
+  playTone(440, 'triangle', 0.06, 0.10);
+}
+
+/** Sonido de nuevo récord: escala rápida */
+function soundRecord() {
+  [523, 659, 784, 880, 1047].forEach((f, i) => {
+    setTimeout(() => playTone(f, 'sine', 0.15, 0.22), i * 80);
+  });
+}
+
+
+/* ────────────────────────────────────────────────────────────────
+   5. PARALLAX
+   Tres capas de elementos decorativos que se desplazan a distintas
+   velocidades dando sensación de profundidad.
+   Los elementos se generan una sola vez al inicializar; luego solo
+   se mueve su offset y se dibujan en módulo (wrap around).
+   ──────────────────────────────────────────────────────────────── */
+
+/**
+ * Genera los elementos decorativos de cada capa.
+ * Se llama una sola vez al arrancar.
+ */
+function initParallax() {
+  const W = CONFIG.WIDTH;
+
+  // ── Capa 0: tejados lejanos del palacio ──
+  // Silueta de techos curvos chinos a lo largo de un ancho doble del canvas
+  parallaxLayers[0].elements = [];
+  for (let x = 0; x < W * 2; x += 80 + Math.random() * 40) {
+    parallaxLayers[0].elements.push({
+      x,
+      y:   CONFIG.HEIGHT - CONFIG.GROUND_H - 120 - Math.random() * 60,
+      w:   60 + Math.random() * 40,
+      h:   30 + Math.random() * 20,
+    });
+  }
+
+  // ── Capa 1: palacio / linternas ──
+  parallaxLayers[1].elements = [];
+  // Paredes
+  for (let x = 0; x < W * 2; x += 120 + Math.random() * 60) {
+    parallaxLayers[1].elements.push({
+      type: 'wall',
+      x,
+      y:    CONFIG.HEIGHT - CONFIG.GROUND_H - 80,
+      w:    80 + Math.random() * 40,
+      h:    80,
+    });
+  }
+  // Linternas colgantes entre las paredes
+  for (let x = 40; x < W * 2; x += 90 + Math.random() * 50) {
+    parallaxLayers[1].elements.push({
+      type: 'lantern',
+      x,
+      y:    40 + Math.random() * 30,
+      swing: Math.random() * Math.PI * 2,   // fase aleatoria del balanceo
+    });
+  }
+
+  // ── Capa 2: bambú / jardín ──
+  parallaxLayers[2].elements = [];
+  for (let x = 0; x < W * 2; x += 18 + Math.random() * 22) {
+    parallaxLayers[2].elements.push({
+      x,
+      h: 80 + Math.random() * 100,
+      w: 6 + Math.random() * 4,
+      segments: Math.floor(3 + Math.random() * 4),
+    });
+  }
+}
+
+/** Mueve los offsets de cada capa según su velocidad */
+function updateParallax() {
+  for (let i = 0; i < parallaxLayers.length; i++) {
+    parallaxLayers[i].offset += CONFIG.PARALLAX_SPEEDS[i];
+    // Wrap modular: cuando offset supera W*2, vuelve a 0 sin salto visual
+    const totalW = CONFIG.WIDTH * 2;
+    if (parallaxLayers[i].offset >= totalW) {
+      parallaxLayers[i].offset -= totalW;
+    }
+  }
+}
+
+/** Dibuja la capa 0: silueta de tejados lejanos */
+function drawParallaxLayer0() {
+  const layer  = parallaxLayers[0];
+  const totalW = CONFIG.WIDTH * 2;
+
+  for (const el of layer.elements) {
+    // Calcular posición con wrap: dibujamos dos veces (x y x-totalW)
+    for (const dx of [0, -totalW]) {
+      const rx = el.x - layer.offset + dx;
+      if (rx + el.w < 0 || rx > CONFIG.WIDTH) continue;
+
+      // Tejado curvo: triángulo con base cóncava
+      ctx.fillStyle = CONFIG.COL.PX0_ROOF;
+      ctx.beginPath();
+      ctx.moveTo(rx, el.y + el.h);
+      ctx.lineTo(rx + el.w / 2, el.y);
+      ctx.lineTo(rx + el.w, el.y + el.h);
+      ctx.closePath();
+      ctx.fill();
+
+      // Línea de caballete (cumbrera)
+      ctx.strokeStyle = CONFIG.COL.PX0_RIDGE;
+      ctx.lineWidth = 1.5;
+      ctx.beginPath();
+      ctx.moveTo(rx + el.w / 2 - 6, el.y + 4);
+      ctx.lineTo(rx + el.w / 2 + 6, el.y + 4);
+      ctx.stroke();
+    }
+  }
+}
+
+/** Dibuja la capa 1: palacio con paredes y linternas */
+function drawParallaxLayer1() {
+  const layer  = parallaxLayers[1];
+  const totalW = CONFIG.WIDTH * 2;
+  const t      = state.frameCount * 0.03;   // tiempo para animar linternas
+
+  for (const el of layer.elements) {
+    for (const dx of [0, -totalW]) {
+      const rx = el.x - layer.offset + dx;
+      if (rx + 100 < 0 || rx > CONFIG.WIDTH) continue;
+
+      if (el.type === 'wall') {
+        // Pared del palacio
+        ctx.fillStyle = CONFIG.COL.PX1_WALL;
+        ctx.fillRect(rx, el.y, el.w, el.h);
+
+        // Tejas del tejado encima
+        ctx.fillStyle = CONFIG.COL.PX1_TILE;
+        ctx.beginPath();
+        ctx.moveTo(rx - 6, el.y);
+        ctx.lineTo(rx + el.w / 2, el.y - 18);
+        ctx.lineTo(rx + el.w + 6, el.y);
+        ctx.closePath();
+        ctx.fill();
+
+        // Ventana circular (luna)
+        ctx.strokeStyle = CONFIG.COL.PX1_TILE;
+        ctx.lineWidth = 1.5;
+        ctx.beginPath();
+        ctx.arc(rx + el.w / 2, el.y + el.h / 2, 10, 0, Math.PI * 2);
+        ctx.stroke();
+
+      } else if (el.type === 'lantern') {
+        // Linterna colgante con balanceo suave
+        const swing = Math.sin(t + el.swing) * 4;
+        drawLantern(rx + swing, el.y, 10, 18);
+      }
+    }
+  }
+}
+
+/**
+ * Dibuja una linterna colgante en (cx, cy).
+ * @param {number} cx  - centro horizontal
+ * @param {number} cy  - punto de colgado superior
+ * @param {number} rw  - semiancho
+ * @param {number} rh  - alto del cuerpo
+ */
+function drawLantern(cx, cy, rw, rh) {
+  // Hilo
+  ctx.strokeStyle = CONFIG.COL.PX1_LANTERN;
+  ctx.lineWidth = 1;
+  ctx.beginPath();
+  ctx.moveTo(cx, cy); ctx.lineTo(cx, cy + 8);
+  ctx.stroke();
+
+  // Cuerpo de la linterna
+  ctx.fillStyle = CONFIG.COL.PX1_LANTERN;
+  ctx.beginPath();
+  ctx.ellipse(cx, cy + 8 + rh / 2, rw, rh / 2, 0, 0, Math.PI * 2);
+  ctx.fill();
+
+  // Fleco inferior
+  ctx.strokeStyle = '#2060aa';
+  ctx.lineWidth = 1;
+  for (let i = -2; i <= 2; i++) {
+    ctx.beginPath();
+    ctx.moveTo(cx + i * (rw / 3), cy + 8 + rh);
+    ctx.lineTo(cx + i * (rw / 3), cy + 8 + rh + 6);
+    ctx.stroke();
+  }
+
+  // Brillo interior (azulado)
+  ctx.fillStyle = 'rgba(100,180,255,0.35)';
+  ctx.beginPath();
+  ctx.ellipse(cx - rw * 0.3, cy + 8 + rh / 2 - 3, rw * 0.3, rh * 0.25, -0.3, 0, Math.PI * 2);
+  ctx.fill();
+}
+
+/** Dibuja la capa 2: tallos de bambú en primer plano */
+function drawParallaxLayer2() {
+  const layer  = parallaxLayers[2];
+  const totalW = CONFIG.WIDTH * 2;
+  const groundY = CONFIG.HEIGHT - CONFIG.GROUND_H;
+
+  for (const el of layer.elements) {
+    for (const dx of [0, -totalW]) {
+      const rx = el.x - layer.offset + dx;
+      if (rx + el.w < 0 || rx > CONFIG.WIDTH) continue;
+
+      // Tallo principal
+      ctx.fillStyle = CONFIG.COL.PX2_BAMBOO;
+      ctx.fillRect(rx, groundY - el.h, el.w, el.h);
+
+      // Nudos del bambú
+      ctx.fillStyle = CONFIG.COL.PX2_LEAF;
+      const segH = el.h / el.segments;
+      for (let s = 1; s < el.segments; s++) {
+        ctx.fillRect(rx - 1, groundY - el.h + segH * s - 2, el.w + 2, 3);
+      }
+
+      // Hojitas en la punta
+      ctx.fillStyle = CONFIG.COL.PX2_LEAF;
+      ctx.beginPath();
+      ctx.ellipse(rx - 6, groundY - el.h - 4, 8, 3, -0.6, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.beginPath();
+      ctx.ellipse(rx + el.w + 4, groundY - el.h - 8, 8, 3, 0.6, 0, Math.PI * 2);
+      ctx.fill();
+    }
+  }
+}
+
+
+/* ────────────────────────────────────────────────────────────────
+   6. FÍSICA  (sin cambios respecto a Fase 2)
+   ──────────────────────────────────────────────────────────────── */
+
+function updatePhysics() {
+  player.vy += CONFIG.GRAVITY;
+  if (player.vy > CONFIG.MAX_FALL) player.vy = CONFIG.MAX_FALL;
+  player.y += player.vy;
+  player.wobble += 0.08;
+}
+
+function jump() {
+  player.vy = CONFIG.JUMP_FORCE;
+  soundJump();   // ← Fase 3: sonido de salto
+}
+
+function updatePillars() {
+  for (const p of pillarList) p.x -= state.speed;
+  pillarList = pillarList.filter(p => p.x + CONFIG.PILLAR_WIDTH > -10);
+}
+
+function spawnPillar() {
+  const groundY = CONFIG.HEIGHT - CONFIG.GROUND_H;
+  const count   = pillarList.length;
+  const type    = (count % 2 === 0) ? 'curtain' : 'shelf';
+
+  if (type === 'curtain') {
+    // Tela que cuelga desde arriba — hangH es la altura que ocupa
+    const minH = 90, maxH = groundY - 180;
+    const hangH = Math.random() * (maxH - minH) + minH;
+    pillarList.push({ x: CONFIG.WIDTH + 10, type: 'curtain', hangH, passed: false });
+    spawnItemForObstacle(CONFIG.WIDTH + 10, 'curtain', hangH);
+  } else {
+    // Repisa que sube desde el suelo — riseH es la altura que ocupa
+    const minH = 90, maxH = groundY - 180;
+    const riseH = Math.random() * (maxH - minH) + minH;
+    pillarList.push({ x: CONFIG.WIDTH + 10, type: 'shelf', riseH, passed: false });
+    spawnItemForObstacle(CONFIG.WIDTH + 10, 'shelf', riseH);
+  }
+}
+
+
+/* ────────────────────────────────────────────────────────────────
+   7. SPAWNING DE COLECCIONABLES  (igual que Fase 2)
+   ──────────────────────────────────────────────────────────────── */
+
+function spawnItemForObstacle(pillarX, obstType, h) {
+  const roll = Math.random();
+  let itemType;
+  if      (roll < CONFIG.HERB_CHANCE)                         itemType = 'herb';
+  else if (roll < CONFIG.HERB_CHANCE + CONFIG.POISON_CHANCE)  itemType = 'poison';
+  else return;
+
+  const groundY = CONFIG.HEIGHT - CONFIG.GROUND_H;
+  let iy;
+  if (obstType === 'curtain') {
+    // Ítem flota en el espacio libre debajo de la tela
+    iy = h + (groundY - h) * 0.45;
+  } else {
+    // Ítem flota en el espacio libre encima de la repisa
+    iy = (groundY - h) * 0.55;
+  }
+
+  itemList.push({
+    x: pillarX + CONFIG.PILLAR_WIDTH / 2,
+    y: iy,
+    type: itemType, alive: true, pulse: 0,
+  });
+}
+
+function updateItems() {
+  for (const it of itemList) { it.x -= state.speed; it.pulse += 0.1; }
+  itemList = itemList.filter(it => it.alive && it.x + CONFIG.ITEM_RADIUS > -10);
+}
+
+
+/* ────────────────────────────────────────────────────────────────
+   8. COLISIONES  (igual que Fase 2, con sonidos añadidos)
+   ──────────────────────────────────────────────────────────────── */
+
+const MARGIN = 5;
+
+function collidesWithPillar(p) {
+  const px1 = player.x + MARGIN,  py1 = player.y + MARGIN;
+  const px2 = player.x + player.w - MARGIN;
+  const py2 = player.y + player.h - MARGIN;
+  // Fuera del rango horizontal → no colisiona
+  if (px2 < p.x || px1 > p.x + CONFIG.PILLAR_WIDTH) return false;
+  if (p.type === 'curtain') {
+    // Tela cuelga desde y=0 hasta y=hangH
+    return py1 < p.hangH;
+  } else {
+    // Repisa sube desde el suelo hasta (groundY - riseH)
+    const groundY = CONFIG.HEIGHT - CONFIG.GROUND_H;
+    return py2 > groundY - p.riseH;
+  }
+}
+
+function checkItemCollisions() {
+  const pcx = player.x + player.w / 2;
+  const pcy = player.y + player.h / 2;
+  const pickRadius = CONFIG.ITEM_RADIUS + 12;
+  for (const it of itemList) {
+    if (!it.alive) continue;
+    const dx = pcx - it.x, dy = pcy - it.y;
+    if (Math.sqrt(dx * dx + dy * dy) < pickRadius) {
+      it.alive = false;
+      if (it.type === 'herb') collectHerb(it.x, it.y);
+      else                    collectPoison(it.x, it.y);
+    }
+  }
+}
+
+function checkCollisions() {
+  const groundY = CONFIG.HEIGHT - CONFIG.GROUND_H;
+  if (player.y + player.h >= groundY) {
+    player.y = groundY - player.h;
+    takeDamage(); return;
+  }
+  if (player.y <= 0) { player.y = 0; player.vy = 0; }
+  for (const p of pillarList) {
+    if (collidesWithPillar(p)) { takeDamage(); return; }
+  }
+}
+
+function takeDamage() {
+  if (state.invuln > 0) return;
+  state.lives--;
+  state.invuln = CONFIG.INVULN_FRAMES;
+  screenFlash  = { color: CONFIG.COL.DAMAGE_FLASH, alpha: 1, decay: 0.04 };
+  spawnFloatingText(player.x + player.w / 2, player.y, '💔 -1 vida', '#ff6060');
+  soundDamage();   // ← Fase 3
+
+  if (state.lives <= 0) {
+    state.lives = 0;
+    saveRecord();   // ← Fase 3: guardar récord antes de game over
+    soundDead();    // ← Fase 3
+    state.phase = 'dead';
+  }
+}
+
+function updateInvuln() {
+  if (state.invuln > 0) state.invuln--;
+}
+
+function collectHerb(ix, iy) {
+  state.herbs++;
+  screenFlash = { color: CONFIG.COL.HERB_FLASH, alpha: 1, decay: 0.05 };
+  spawnFloatingText(ix, iy, '+🌿 hierba', '#66bb6a');
+  soundHerb();   // ← Fase 3
+
+  if (state.herbs >= CONFIG.HERBS_TO_WIN) {
+    saveRecord();   // ← Fase 3
+    soundWin();     // ← Fase 3
+    state.phase = 'win';
+  }
+}
+
+function collectPoison(ix, iy) {
+  if (state.invuln > 0) return;
+  state.lives--;
+  state.invuln = CONFIG.INVULN_FRAMES;
+  screenFlash  = { color: CONFIG.COL.DAMAGE_FLASH, alpha: 1, decay: 0.04 };
+  spawnFloatingText(ix, iy, '☠ veneno', '#ce93d8');
+  soundDamage();   // ← Fase 3
+
+  if (state.lives <= 0) {
+    state.lives = 0;
+    saveRecord();
+    soundDead();
+    state.phase = 'dead';
+  }
+}
+
+function checkScore() {
+  for (const p of pillarList) {
+    if (!p.passed && p.x + CONFIG.PILLAR_WIDTH < player.x) {
+      p.passed = true;
+      state.score++;
+      soundScore();   // ← Fase 3: tick al superar pilar
+      if (state.score % 5 === 0) state.speed += CONFIG.SPEED_INCREMENT;
+    }
+  }
+}
+
+
+/* ────────────────────────────────────────────────────────────────
+   9. FEEDBACK VISUAL  (igual que Fase 2)
+   ──────────────────────────────────────────────────────────────── */
+
+function spawnFloatingText(x, y, text, color) {
+  floatingTexts.push({ x, y, text, color, life: 1.0, vy: -1.2 });
+}
+
+function updateFloatingTexts() {
+  for (const ft of floatingTexts) { ft.y += ft.vy; ft.life -= 0.022; }
+  floatingTexts = floatingTexts.filter(ft => ft.life > 0);
+}
+
+function updateScreenFlash() {
+  if (!screenFlash) return;
+  screenFlash.alpha -= screenFlash.decay;
+  if (screenFlash.alpha <= 0) screenFlash = null;
+}
+
+
+/* ────────────────────────────────────────────────────────────────
+   RÉCORD  (localStorage)
+   ── NUEVO Fase 3 ──
+   Guardamos el mayor número de hierbas recolectadas en una partida.
+   localStorage.setItem / getItem persisten entre sesiones del
+   navegador sin necesidad de servidor.
+   ──────────────────────────────────────────────────────────────── */
+
+/** Carga el récord guardado al iniciar la página */
+function loadRecord() {
+  try {
+    const stored = localStorage.getItem(CONFIG.RECORD_KEY);
+    state.record = stored ? parseInt(stored, 10) : 0;
+  } catch (e) {
+    state.record = 0;   // entornos sin localStorage (ej. algunos iframes)
+  }
+}
+
+/**
+ * Al final de una partida comprueba si el score actual (hierbas)
+ * supera el récord y lo guarda.
+ */
+function saveRecord() {
+  try {
+    if (state.herbs > state.record) {
+      state.record    = state.herbs;
+      state.newRecord = true;
+      localStorage.setItem(CONFIG.RECORD_KEY, String(state.record));
+      soundRecord();   // fanfarria de récord
+    } else {
+      state.newRecord = false;
+    }
+  } catch (e) { /* ignorar */ }
+}
+
+
+/* ────────────────────────────────────────────────────────────────
+   10. ENTRADA DEL USUARIO  (igual que Fase 2)
+   ──────────────────────────────────────────────────────────────── */
+
+function handleInput() {
+  if (state.phase === 'idle')                    { startGame(); return; }
+  if (state.phase === 'playing')                 { jump();      return; }
+  if (state.phase === 'dead' || state.phase === 'win') { resetGame(); return; }
+}
+
+document.addEventListener('keydown', e => {
+  if (e.code === 'Space') { e.preventDefault(); handleInput(); }
+});
+
+const canvas = document.getElementById('gameCanvas');
+canvas.addEventListener('click', () => handleInput());
+canvas.addEventListener('touchstart', e => {
+  e.preventDefault(); handleInput();
+}, { passive: false });
+
+
+/* ────────────────────────────────────────────────────────────────
+   11. RENDERIZADO
+   ──────────────────────────────────────────────────────────────── */
+
+const ctx = canvas.getContext('2d');
+
+/**
+ * ── NUEVO Fase 3 ──
+ * Fondo: ahora incluye el cielo degradado + las tres capas parallax.
+ * Orden de pintura (de más lejano a más cercano):
+ *   1. degradado de cielo
+ *   2. luna
+ *   3. capa 0 (tejados lejanos)
+ *   4. capa 1 (palacio/linternas)
+ *   5. capa 2 (bambú — solo parte baja)
+ */
+function drawBackground() {
+  // Cielo degradado azul oscuro
+  const grad = ctx.createLinearGradient(0, 0, 0, CONFIG.HEIGHT - CONFIG.GROUND_H);
+  grad.addColorStop(0, '#010610');
+  grad.addColorStop(0.4, '#020e28');
+  grad.addColorStop(1, '#061838');
+  ctx.fillStyle = grad;
+  ctx.fillRect(0, 0, CONFIG.WIDTH, CONFIG.HEIGHT - CONFIG.GROUND_H);
+
+  // Estrellas animadas
+  drawStars();
+
+  // Luna llena
+  drawMoon();
+
+  // Capas parallax del fondo (0 y 1 van detrás de los pilares)
+  drawParallaxLayer0();
+  drawParallaxLayer1();
+}
+
+/** Luna con halo suave */
+function drawMoon() {
+  const mx = CONFIG.WIDTH * 0.78, my = 70;
+  // Halo exterior
+  const halo = ctx.createRadialGradient(mx, my, 18, mx, my, 45);
+  halo.addColorStop(0, 'rgba(180,210,255,0.18)');
+  halo.addColorStop(1, 'rgba(180,210,255,0)');
+  ctx.fillStyle = halo;
+  ctx.beginPath(); ctx.arc(mx, my, 45, 0, Math.PI * 2); ctx.fill();
+  // Cuerpo de la luna
+  const moonGrad = ctx.createRadialGradient(mx - 4, my - 4, 2, mx, my, 18);
+  moonGrad.addColorStop(0, '#e8f0ff');
+  moonGrad.addColorStop(0.6, '#c8d8ff');
+  moonGrad.addColorStop(1, '#a0b8ee');
+  ctx.fillStyle = moonGrad;
+  ctx.beginPath(); ctx.arc(mx, my, 18, 0, Math.PI * 2); ctx.fill();
+  // Cráteres sutiles
+  ctx.fillStyle = 'rgba(120,150,200,0.3)';
+  ctx.beginPath(); ctx.arc(mx + 6, my - 5, 4, 0, Math.PI * 2); ctx.fill();
+  ctx.beginPath(); ctx.arc(mx - 5, my + 6, 3, 0, Math.PI * 2); ctx.fill();
+  ctx.beginPath(); ctx.arc(mx + 2, my + 9, 2, 0, Math.PI * 2); ctx.fill();
+}
+
+/**
+ * ── NUEVO Fase 3 ──
+ * Estrellas: puntos pequeños pintados en posiciones fijas derivadas
+ * de una semilla simple.  No se mueven (son parte del cielo lejano).
+ * Algunas parpadean suavemente.
+ */
+function drawStars() {
+  const t = state.frameCount * 0.02;
+  // 60 estrellas con posiciones pseudoaleatorias pero fijas
+  for (let i = 0; i < 60; i++) {
+    const sx = ((i * 137 + 53) % CONFIG.WIDTH);
+    const sy = ((i * 89  + 17) % (CONFIG.HEIGHT * 0.75));
+    const sr = (i % 5 === 0) ? 2 : (i % 3 === 0) ? 1.5 : 1;
+    // Parpadeo suave en algunas
+    const twinkle = (i % 4 === 0) ? 0.5 + 0.5 * Math.sin(t + i) : 1;
+    const alpha = (0.4 + (i % 3) * 0.2) * twinkle;
+    // Algunas estrellas con tono azulado, otras blancas
+    if (i % 7 === 0) {
+      ctx.fillStyle = `rgba(160,200,255,${alpha})`;
+    } else if (i % 5 === 0) {
+      ctx.fillStyle = `rgba(200,220,255,${alpha})`;
+    } else {
+      ctx.fillStyle = `rgba(255,255,255,${alpha})`;
+    }
+    ctx.beginPath();
+    ctx.arc(sx, sy, sr, 0, Math.PI * 2);
+    ctx.fill();
+    // Cruz/destello en las más grandes
+    if (sr >= 2) {
+      ctx.strokeStyle = `rgba(255,255,255,${alpha * 0.5})`;
+      ctx.lineWidth = 0.5;
+      ctx.beginPath();
+      ctx.moveTo(sx - sr * 2.5, sy); ctx.lineTo(sx + sr * 2.5, sy);
+      ctx.moveTo(sx, sy - sr * 2.5); ctx.lineTo(sx, sy + sr * 2.5);
+      ctx.stroke();
+    }
+  }
+}
+
+/** Suelo */
+function drawGround() {
+  const y = CONFIG.HEIGHT - CONFIG.GROUND_H;
+  const grad = ctx.createLinearGradient(0, y, 0, CONFIG.HEIGHT);
+  grad.addColorStop(0, CONFIG.COL.GROUND_TOP);
+  grad.addColorStop(1, CONFIG.COL.GROUND_BOT);
+  ctx.fillStyle = grad;
+  ctx.fillRect(0, y, CONFIG.WIDTH, CONFIG.GROUND_H);
+
+  ctx.strokeStyle = CONFIG.COL.PILLAR_CAP;
+  ctx.lineWidth = 2;
+  ctx.beginPath();
+  ctx.moveTo(0, y); ctx.lineTo(CONFIG.WIDTH, y);
+  ctx.stroke();
+
+  // Estrellas reflejadas en el suelo
+  ctx.fillStyle = 'rgba(100,150,255,0.12)';
+  for (let i = 0; i < 12; i++) {
+    const sx = ((i * 211 + 73) % CONFIG.WIDTH);
+    ctx.beginPath();
+    ctx.arc(sx, y + 15 + (i % 3) * 10, 1, 0, Math.PI * 2);
+    ctx.fill();
+  }
+}
+
+/** Telas de seda colgantes (obstáculo superior) con animación de viento */
+function drawSilkCurtain(p) {
+  const x    = p.x;
+  const topH = p.hangH;   // hangH = cuánto cuelga desde arriba
+  const w    = CONFIG.PILLAR_WIDTH;
+  const t = state.frameCount * 0.04;
+
+  // ── Barra/travesaño de la que cuelgan las telas ──
+  const barH = 12;
+  const barGrad = ctx.createLinearGradient(x - 4, 0, x + w + 4, 0);
+  barGrad.addColorStop(0,   '#0a1a40');
+  barGrad.addColorStop(0.4, '#1a3878');
+  barGrad.addColorStop(1,   '#0a1a40');
+  ctx.fillStyle = barGrad;
+  ctx.beginPath();
+  ctx.roundRect(x - 6, 0, w + 12, topH - barH + 4, [0, 0, 4, 4]);
+  ctx.fill();
+  // Cara inferior de la barra (dorada)
+  ctx.fillStyle = '#3a6fba';
+  ctx.fillRect(x - 6, topH - barH, w + 12, barH);
+  // Detalle: línea brillante en la barra
+  ctx.fillStyle = 'rgba(120,170,255,0.4)';
+  ctx.fillRect(x - 4, topH - barH + 2, w + 8, 2);
+
+  // Argollas de las que cuelgan las telas
+  const ringCount = 5;
+  const ringSpacing = w / (ringCount - 1);
+  for (let r = 0; r < ringCount; r++) {
+    const rx = x + r * ringSpacing;
+    ctx.strokeStyle = '#5599cc';
+    ctx.lineWidth = 2;
+    ctx.beginPath();
+    ctx.arc(rx, topH - barH + 1, 4, Math.PI, Math.PI * 2);
+    ctx.stroke();
+  }
+
+  // ── Paños de seda colgantes (3 capas de distintas telas) ──
+  const panels = [
+    { xOffset: 0,       colorA: '#8822aa', colorB: '#cc44ff', alpha: 0.92, phase: 0    },
+    { xOffset: w * 0.35, colorA: '#1144aa', colorB: '#4488ee', alpha: 0.88, phase: 1.8 },
+    { xOffset: w * 0.65, colorA: '#aa2244', colorB: '#ee5577', alpha: 0.85, phase: 3.5 },
+  ];
+
+  const hangLength = topH - barH - 8;
+
+  for (const panel of panels) {
+    const px = x + panel.xOffset;
+    const pw = w * 0.55;
+
+    ctx.save();
+    ctx.globalAlpha = panel.alpha;
+
+    // Ondulación del viento: cada panel tiene una fase distinta
+    // El borde izquierdo y derecho oscilan con pequeñas diferencias
+    const windL = Math.sin(t + panel.phase) * 5 + Math.sin(t * 1.7 + panel.phase) * 2;
+    const windR = Math.sin(t + panel.phase + 0.8) * 5 + Math.sin(t * 1.3 + panel.phase) * 2;
+    const windMid = Math.sin(t * 0.9 + panel.phase + 0.4) * 8;
+
+    // Gradiente vertical de la seda
+    const silkGrad = ctx.createLinearGradient(px, topH - barH, px + pw, topH + hangLength);
+    silkGrad.addColorStop(0,   panel.colorA);
+    silkGrad.addColorStop(0.5, panel.colorB);
+    silkGrad.addColorStop(1,   panel.colorA + 'cc');
+    ctx.fillStyle = silkGrad;
+
+    // Forma del paño con curva Bezier para el ondeo
+    ctx.beginPath();
+    ctx.moveTo(px,       topH - barH + 2);
+    ctx.lineTo(px + pw,  topH - barH + 2);
+    // Lado derecho bajando (con viento)
+    ctx.bezierCurveTo(
+      px + pw + windR,   topH - barH + hangLength * 0.35,
+      px + pw + windMid, topH - barH + hangLength * 0.65,
+      px + pw * 0.5 + windR * 0.6, topH - barH + hangLength
+    );
+    // Lado izquierdo subiendo (con viento)
+    ctx.bezierCurveTo(
+      px + windMid, topH - barH + hangLength * 0.65,
+      px + windL,   topH - barH + hangLength * 0.35,
+      px,           topH - barH + 2
+    );
+    ctx.closePath();
+    ctx.fill();
+
+    // Brillo de seda (reflejo de luz)
+    const shineGrad = ctx.createLinearGradient(px, topH - barH, px + pw * 0.4, topH - barH + hangLength * 0.5);
+    shineGrad.addColorStop(0, 'rgba(255,255,255,0.22)');
+    shineGrad.addColorStop(1, 'rgba(255,255,255,0)');
+    ctx.fillStyle = shineGrad;
+    ctx.beginPath();
+    ctx.moveTo(px + 3,       topH - barH + 2);
+    ctx.lineTo(px + pw * 0.4, topH - barH + 2);
+    ctx.bezierCurveTo(
+      px + pw * 0.4 + windR * 0.4, topH - barH + hangLength * 0.35,
+      px + pw * 0.2 + windMid * 0.3, topH - barH + hangLength * 0.5,
+      px + 3 + windL * 0.4, topH - barH + hangLength * 0.5
+    );
+    ctx.bezierCurveTo(
+      px + windL * 0.3, topH - barH + hangLength * 0.3,
+      px + windL * 0.2, topH - barH + hangLength * 0.15,
+      px + 3, topH - barH + 2
+    );
+    ctx.closePath();
+    ctx.fill();
+
+    // Flecos en el borde inferior
+    ctx.globalAlpha = panel.alpha * 0.9;
+    const fringeCount = 7;
+    for (let f = 0; f < fringeCount; f++) {
+      const ft = f / (fringeCount - 1);
+      // Interpolar la posición de la base inferior del paño
+      const baseX = px + pw * 0.5 + windR * 0.6 + (px - (px + pw * 0.5 + windR * 0.6)) * (1 - ft);
+      const baseXL = px + windL * 0.6;
+      const fringeX = baseXL + (baseX - baseXL) * ft;
+      const fringeBaseY = topH - barH + hangLength;
+      const fringeWave = Math.sin(t * 1.5 + panel.phase + f * 0.8) * 3;
+      ctx.strokeStyle = panel.colorB;
+      ctx.lineWidth = 1.5;
+      ctx.lineCap = 'round';
+      ctx.beginPath();
+      ctx.moveTo(fringeX, fringeBaseY);
+      ctx.lineTo(fringeX + fringeWave, fringeBaseY + 8 + (f % 2) * 4);
+      ctx.stroke();
+    }
+
+    ctx.restore();
+  }
+
+  // ── Borla decorativa central (cuelga de la barra) ──
+  const tassel = {
+    x: x + w / 2 + Math.sin(t * 0.6) * 3,
+    y: topH - barH - 5,
+  };
+  ctx.fillStyle = '#ffcc44';
+  ctx.beginPath(); ctx.arc(tassel.x, tassel.y, 4, 0, Math.PI * 2); ctx.fill();
+  ctx.strokeStyle = '#cc9900';
+  ctx.lineWidth = 1;
+  for (let i = -2; i <= 2; i++) {
+    ctx.beginPath();
+    ctx.moveTo(tassel.x + i * 2, tassel.y + 4);
+    ctx.lineTo(tassel.x + i * 2 + Math.sin(t + i) * 2, tassel.y + 12);
+    ctx.stroke();
+  }
+}
+
+/** Repisa de madera con frascos — sube desde el suelo */
+function drawShelfBottom(p) {
+  const groundY = CONFIG.HEIGHT - CONFIG.GROUND_H;
+  const x       = p.x;
+  const w       = CONFIG.PILLAR_WIDTH;
+  const riseH   = p.riseH;
+  const topY    = groundY - riseH;   // borde superior de la repisa
+  const t       = state.frameCount * 0.028;
+
+  // ── Soporte vertical de madera ──────────────────────────────────
+  // Cuerpo principal
+  const woodGrad = ctx.createLinearGradient(x, 0, x + w, 0);
+  woodGrad.addColorStop(0,    '#1e0c04');
+  woodGrad.addColorStop(0.2,  '#5c3010');
+  woodGrad.addColorStop(0.55, '#7a4418');
+  woodGrad.addColorStop(0.8,  '#5c3010');
+  woodGrad.addColorStop(1,    '#2a1206');
+  ctx.fillStyle = woodGrad;
+  ctx.fillRect(x, topY + 14, w, riseH - 14);
+
+  // Vetas horizontales de la madera
+  ctx.strokeStyle = 'rgba(0,0,0,0.15)';
+  ctx.lineWidth = 1;
+  for (let v = 0; v < 4; v++) {
+    const vy = topY + 20 + v * ((riseH - 20) / 4);
+    ctx.beginPath();
+    ctx.moveTo(x + 2, vy);
+    ctx.bezierCurveTo(x + w * 0.3, vy + Math.sin(v * 1.3) * 3,
+                      x + w * 0.7, vy - Math.sin(v * 1.1) * 3,
+                      x + w - 2,   vy);
+    ctx.stroke();
+  }
+
+  // Sombra lateral izquierda
+  ctx.fillStyle = 'rgba(0,0,0,0.22)';
+  ctx.fillRect(x, topY + 14, 6, riseH - 14);
+
+  // ── Tablón de la repisa ─────────────────────────────────────────
+  const shelfThick = 14;
+  const shelfGrad = ctx.createLinearGradient(x - 8, topY, x - 8, topY + shelfThick);
+  shelfGrad.addColorStop(0,   '#d08838');
+  shelfGrad.addColorStop(0.4, '#c07028');
+  shelfGrad.addColorStop(1,   '#7a4818');
+  ctx.fillStyle = shelfGrad;
+  ctx.beginPath();
+  ctx.roundRect(x - 9, topY, w + 18, shelfThick, [3, 3, 1, 1]);
+  ctx.fill();
+
+  // Borde frontal brillante del tablón
+  ctx.fillStyle = 'rgba(220,160,60,0.7)';
+  ctx.fillRect(x - 9, topY, w + 18, 3);
+
+  // Sombra bajo el tablón
+  ctx.fillStyle = 'rgba(0,0,0,0.40)';
+  ctx.fillRect(x - 9, topY + shelfThick - 2, w + 18, 5);
+
+  // Clavos decorativos
+  ctx.fillStyle = '#8899aa';
+  ctx.beginPath(); ctx.arc(x,         topY + 7, 2.5, 0, Math.PI * 2); ctx.fill();
+  ctx.beginPath(); ctx.arc(x + w,     topY + 7, 2.5, 0, Math.PI * 2); ctx.fill();
+  ctx.beginPath(); ctx.arc(x + w / 2, topY + 7, 2,   0, Math.PI * 2); ctx.fill();
+
+  // ── Frascos sobre la repisa ─────────────────────────────────────
+  const flasks = [
+    { dx:  3, h: 26, rw: 6,   body: '#1a6644', liquid: '#2aaa66', shine: '#66ffaa' },
+    { dx: 15, h: 20, rw: 5.5, body: '#6a2244', liquid: '#dd4488', shine: '#ff88cc' },
+    { dx: 27, h: 30, rw: 7,   body: '#1a3a88', liquid: '#4488ee', shine: '#88bbff' },
+    { dx: 42, h: 18, rw: 5,   body: '#885522', liquid: '#ddaa44', shine: '#ffdd88' },
+    { dx: 54, h: 24, rw: 5.5, body: '#3a6622', liquid: '#88cc44', shine: '#bbff66' },
+  ];
+
+  for (let i = 0; i < flasks.length; i++) {
+    const fd = flasks[i];
+    const fx   = x + fd.dx + fd.rw;
+    const fBot = topY;                   // base del frasco = superficie del tablón
+    const fTop = fBot - fd.h;            // cima del frasco
+    // Vibración suave individual (como si temblaran por el viento)
+    const wobbleDeg = Math.sin(t + i * 1.4) * 0.9;
+
+    ctx.save();
+    // Rotar respecto al centro-base del frasco
+    ctx.translate(fx, fBot);
+    ctx.rotate(wobbleDeg * Math.PI / 180);
+    ctx.translate(-fx, -fBot);
+
+    // ── Cuerpo del frasco ──
+    const fg = ctx.createLinearGradient(fx - fd.rw, 0, fx + fd.rw, 0);
+    fg.addColorStop(0,    fd.body + '99');
+    fg.addColorStop(0.3,  fd.body);
+    fg.addColorStop(0.65, fd.body + 'cc');
+    fg.addColorStop(1,    fd.body + '77');
+    ctx.fillStyle = fg;
+    ctx.beginPath();
+    ctx.roundRect(fx - fd.rw, fTop + 6, fd.rw * 2, fd.h - 6,
+                  [fd.rw * 0.9, fd.rw * 0.9, fd.rw * 0.5, fd.rw * 0.5]);
+    ctx.fill();
+
+    // ── Líquido interior ──
+    const liqH = (fd.h - 12) * 0.6;
+    ctx.fillStyle = fd.liquid + 'bb';
+    ctx.beginPath();
+    ctx.roundRect(fx - fd.rw + 2, fBot - liqH - 2, fd.rw * 2 - 4, liqH,
+                  [1, 1, fd.rw * 0.4, fd.rw * 0.4]);
+    ctx.fill();
+    // Superficie del líquido (brillo)
+    ctx.fillStyle = 'rgba(255,255,255,0.18)';
+    ctx.fillRect(fx - fd.rw + 3, fBot - liqH - 2, fd.rw * 2 - 6, 2);
+
+    // ── Cuello del frasco ──
+    ctx.fillStyle = fd.body;
+    ctx.beginPath();
+    ctx.roundRect(fx - fd.rw * 0.55, fTop, fd.rw * 1.1, 8, 2);
+    ctx.fill();
+
+    // ── Tapón de corcho ──
+    const corkG = ctx.createLinearGradient(fx - fd.rw * 0.45, fTop - 7, fx + fd.rw * 0.45, fTop - 7);
+    corkG.addColorStop(0, '#a07840');
+    corkG.addColorStop(0.5, '#c8a060');
+    corkG.addColorStop(1, '#a07840');
+    ctx.fillStyle = corkG;
+    ctx.beginPath();
+    ctx.roundRect(fx - fd.rw * 0.45, fTop - 7, fd.rw * 0.9, 8, [2, 2, 1, 1]);
+    ctx.fill();
+    // Ranura del corcho
+    ctx.strokeStyle = 'rgba(0,0,0,0.25)';
+    ctx.lineWidth = 0.8;
+    ctx.beginPath();
+    ctx.moveTo(fx - fd.rw * 0.3, fTop - 4);
+    ctx.lineTo(fx + fd.rw * 0.3, fTop - 4);
+    ctx.stroke();
+
+    // ── Brillo lateral del vidrio ──
+    ctx.fillStyle = 'rgba(255,255,255,0.30)';
+    ctx.beginPath();
+    ctx.roundRect(fx - fd.rw + 2, fTop + 8, fd.rw * 0.45, fd.h * 0.38, 2);
+    ctx.fill();
+
+    // ── Destello puntual ──
+    ctx.fillStyle = 'rgba(255,255,255,0.70)';
+    ctx.beginPath();
+    ctx.arc(fx - fd.rw + 4, fTop + 10, 1.5, 0, Math.PI * 2);
+    ctx.fill();
+
+    // ── Contorno del frasco ──
+    ctx.strokeStyle = 'rgba(0,0,0,0.35)';
+    ctx.lineWidth = 0.9;
+    ctx.beginPath();
+    ctx.roundRect(fx - fd.rw, fTop + 6, fd.rw * 2, fd.h - 6,
+                  [fd.rw * 0.9, fd.rw * 0.9, fd.rw * 0.5, fd.rw * 0.5]);
+    ctx.stroke();
+
+    ctx.restore();
+  }
+
+  // ── Sombra bajo frascos sobre el tablón ────────────────────────
+  for (let i = 0; i < flasks.length; i++) {
+    const fd = flasks[i];
+    const fx = x + fd.dx + fd.rw;
+    ctx.fillStyle = 'rgba(0,0,0,0.20)';
+    ctx.beginPath();
+    ctx.ellipse(fx, topY - 1, fd.rw * 0.9, 3, 0, 0, Math.PI * 2);
+    ctx.fill();
+  }
+}
+
+function drawPillars() {
+  for (const p of pillarList) {
+    if (p.type === 'curtain') {
+      drawSilkCurtain(p);
+    } else {
+      drawShelfBottom(p);
+    }
+  }
+}
+
+/** Hierba medicinal */
+function drawHerb(it) {
+  const { x, y, pulse } = it;
+  const scale = 1 + Math.sin(pulse) * 0.08;
+  ctx.save(); ctx.translate(x, y); ctx.scale(scale, scale);
+
+  const glow = ctx.createRadialGradient(0, 0, 2, 0, 0, CONFIG.ITEM_RADIUS + 6);
+  glow.addColorStop(0, 'rgba(76,175,80,0.5)');
+  glow.addColorStop(1, 'rgba(76,175,80,0)');
+  ctx.fillStyle = glow;
+  ctx.beginPath(); ctx.arc(0, 0, CONFIG.ITEM_RADIUS + 6, 0, Math.PI * 2); ctx.fill();
+
+  ctx.strokeStyle = CONFIG.COL.HERB_STEM; ctx.lineWidth = 2;
+  ctx.beginPath(); ctx.moveTo(0, 8); ctx.lineTo(0, -8); ctx.stroke();
+
+  ctx.fillStyle = CONFIG.COL.HERB;
+  ctx.beginPath(); ctx.ellipse(-6, 0,  7, 4, -0.5, 0, Math.PI * 2); ctx.fill();
+  ctx.beginPath(); ctx.ellipse( 6, -3, 7, 4,  0.5, 0, Math.PI * 2); ctx.fill();
+
+  ctx.fillStyle = '#fff176';
+  ctx.beginPath(); ctx.arc(0, -8, 3, 0, Math.PI * 2); ctx.fill();
+
+  ctx.restore();
+}
+
+/** Frasco de veneno */
+function drawPoison(it) {
+  const { x, y, pulse } = it;
+  const scale = 1 + Math.sin(pulse + 1) * 0.06;
+  ctx.save(); ctx.translate(x, y); ctx.scale(scale, scale);
+
+  const glow = ctx.createRadialGradient(0, 0, 2, 0, 0, CONFIG.ITEM_RADIUS + 6);
+  glow.addColorStop(0, 'rgba(123,31,162,0.55)');
+  glow.addColorStop(1, 'rgba(123,31,162,0)');
+  ctx.fillStyle = glow;
+  ctx.beginPath(); ctx.arc(0, 0, CONFIG.ITEM_RADIUS + 6, 0, Math.PI * 2); ctx.fill();
+
+  ctx.fillStyle = CONFIG.COL.POISON;
+  ctx.beginPath(); ctx.roundRect(-6, -4, 12, 14, 3); ctx.fill();
+  ctx.fillStyle = '#9c27b0'; ctx.fillRect(-3, -9, 6, 6);
+  ctx.fillStyle = '#4a148c'; ctx.fillRect(-4, -11, 8, 3);
+  ctx.fillStyle = 'rgba(206,147,216,0.5)';
+  ctx.beginPath(); ctx.roundRect(-4, 0, 8, 8, 2); ctx.fill();
+  ctx.fillStyle = '#fff'; ctx.font = 'bold 9px sans-serif';
+  ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+  ctx.fillText('☠', 0, 3);
+  ctx.restore();
+}
+
+function drawItems() {
+  for (const it of itemList) {
+    if (!it.alive) continue;
+    if (it.type === 'herb') drawHerb(it); else drawPoison(it);
+  }
+}
+
+/** Personaje: chibi cat-girl con orejas de gato, pelo verde oscuro, ojos azules, kimono verde y cola */
+function drawPlayer() {
+  if (state.invuln > 0 && Math.floor(state.invuln / 5) % 2 === 0) return;
+
+  ctx.save();
+  const cx = player.x + player.w / 2;
+  const cy = player.y + player.h / 2;
+  ctx.translate(cx, cy);
+  const tilt = Math.min(Math.max(player.vy * 2.0, -20), 35);
+  ctx.rotate((tilt * Math.PI) / 180);
+
+  const hw = player.w / 2, hh = player.h / 2;
+  const wobbleX = Math.sin(player.wobble) * 2;
+  const t = state.frameCount * 0.1;
+
+  // ── Cola de gato (detrás del cuerpo) ──
+  const tailWave = Math.sin(t * 0.8) * 0.4;
+  ctx.strokeStyle = '#1a4030';
+  ctx.lineWidth = 4;
+  ctx.lineCap = 'round';
+  ctx.beginPath();
+  ctx.moveTo(hw - 2, hh - 4);
+  ctx.quadraticCurveTo(hw + 14, hh + 2, hw + 18 + Math.sin(t) * 4, hh - 12 + Math.cos(t * 0.7) * 6);
+  ctx.stroke();
+  // Punta de la cola
+  ctx.strokeStyle = '#2a6050';
+  ctx.lineWidth = 2;
+  ctx.beginPath();
+  ctx.moveTo(hw + 18 + Math.sin(t) * 4, hh - 12 + Math.cos(t * 0.7) * 6);
+  ctx.quadraticCurveTo(hw + 22 + Math.sin(t) * 3, hh - 18 + Math.cos(t) * 4, hw + 20 + Math.sin(t) * 2, hh - 22 + Math.cos(t * 1.2) * 5);
+  ctx.stroke();
+  // Bolita en la punta
+  ctx.fillStyle = '#4a90a0';
+  ctx.beginPath();
+  ctx.arc(hw + 20 + Math.sin(t) * 2, hh - 22 + Math.cos(t * 1.2) * 5, 2.5, 0, Math.PI * 2);
+  ctx.fill();
+
+  // ── Globo (elemento decorativo arriba) ──
+  ctx.strokeStyle = '#3a6fba'; ctx.lineWidth = 1.5;
+  ctx.beginPath();
+  ctx.moveTo(wobbleX, -hh + 2);
+  ctx.quadraticCurveTo(wobbleX + 4, -hh - 10, wobbleX, -hh - 20);
+  ctx.stroke();
+  const bx = wobbleX, by = -hh - 34;
+  ctx.fillStyle = '#e05050';
+  ctx.beginPath(); ctx.ellipse(bx, by, 10, 13, 0, 0, Math.PI * 2); ctx.fill();
+  ctx.fillStyle = 'rgba(255,255,255,0.3)';
+  ctx.beginPath(); ctx.ellipse(bx - 3, by - 4, 3, 5, -0.4, 0, Math.PI * 2); ctx.fill();
+
+  // ── Cuerpo (kimono verde) ──
+  // Falda/kimono
+  ctx.fillStyle = '#4a9040';
+  ctx.beginPath();
+  ctx.moveTo(-hw - 2, -4);
+  ctx.lineTo(hw + 2, -4);
+  ctx.lineTo(hw + 5, hh + 2);
+  ctx.lineTo(-hw - 5, hh + 2);
+  ctx.closePath();
+  ctx.fill();
+
+  // Detalle del kimono (solapa cruzada)
+  ctx.fillStyle = '#6ab050';
+  ctx.beginPath();
+  ctx.moveTo(-3, -4);
+  ctx.lineTo(4, -4);
+  ctx.lineTo(2, hh - 4);
+  ctx.lineTo(-5, hh - 4);
+  ctx.closePath();
+  ctx.fill();
+
+  // Cinturón/obi
+  ctx.fillStyle = '#2a5030';
+  ctx.fillRect(-hw - 1, 0, player.w + 2, 5);
+
+  // Brazos extendidos
+  ctx.fillStyle = '#6ab050';
+  // Brazo izquierdo
+  ctx.save(); ctx.translate(-hw - 1, -hh + 12); ctx.rotate(0.4);
+  ctx.beginPath(); ctx.roundRect(0, 0, 13, 5, 2); ctx.fill();
+  // Mano izquierda
+  ctx.fillStyle = '#f0c090';
+  ctx.beginPath(); ctx.ellipse(14, 2, 4, 3, 0.3, 0, Math.PI * 2); ctx.fill();
+  ctx.restore();
+  // Brazo derecho
+  ctx.fillStyle = '#6ab050';
+  ctx.save(); ctx.translate(hw - 12, -hh + 12); ctx.rotate(-0.4);
+  ctx.beginPath(); ctx.roundRect(0, 0, 13, 5, 2); ctx.fill();
+  // Mano derecha
+  ctx.fillStyle = '#f0c090';
+  ctx.beginPath(); ctx.ellipse(14, 2, 4, 3, -0.3, 0, Math.PI * 2); ctx.fill();
+  ctx.restore();
+
+  // ── Cabeza grande (estilo chibi) ──
+  const headY = -hh + 2;
+  // Base de la cabeza
+  ctx.fillStyle = '#f0c090';
+  ctx.beginPath();
+  ctx.ellipse(0, headY + 8, 12, 13, 0, 0, Math.PI * 2);
+  ctx.fill();
+
+  // ── Pelo verde oscuro ──
+  // Parte posterior del pelo
+  ctx.fillStyle = '#1a4030';
+  ctx.beginPath();
+  ctx.ellipse(0, headY + 6, 13, 12, 0, Math.PI, Math.PI * 2);
+  ctx.fill();
+  // Pelo largo que cae a los lados
+  ctx.fillStyle = '#1a4030';
+  ctx.beginPath();
+  ctx.ellipse(-10, headY + 14, 4, 9, -0.3, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.beginPath();
+  ctx.ellipse(10, headY + 15, 4, 8, 0.3, 0, Math.PI * 2);
+  ctx.fill();
+  // Flequillo
+  ctx.fillStyle = '#1a4030';
+  ctx.beginPath();
+  ctx.moveTo(-12, headY + 6);
+  ctx.quadraticCurveTo(-8, headY - 4, 0, headY - 2);
+  ctx.quadraticCurveTo(8, headY - 4, 12, headY + 6);
+  ctx.lineTo(12, headY + 10);
+  ctx.lineTo(-12, headY + 10);
+  ctx.closePath();
+  ctx.fill();
+
+  // ── Orejas de gato ──
+  // Oreja izquierda
+  ctx.fillStyle = '#1a4030';
+  ctx.beginPath();
+  ctx.moveTo(-10, headY - 2);
+  ctx.lineTo(-16, headY - 14);
+  ctx.lineTo(-4, headY - 6);
+  ctx.closePath();
+  ctx.fill();
+  // Interior oreja izquierda
+  ctx.fillStyle = '#2d6050';
+  ctx.beginPath();
+  ctx.moveTo(-9, headY - 3);
+  ctx.lineTo(-14, headY - 12);
+  ctx.lineTo(-5, headY - 6);
+  ctx.closePath();
+  ctx.fill();
+  // Oreja derecha
+  ctx.fillStyle = '#1a4030';
+  ctx.beginPath();
+  ctx.moveTo(10, headY - 2);
+  ctx.lineTo(16, headY - 14);
+  ctx.lineTo(4, headY - 6);
+  ctx.closePath();
+  ctx.fill();
+  // Interior oreja derecha
+  ctx.fillStyle = '#2d6050';
+  ctx.beginPath();
+  ctx.moveTo(9, headY - 3);
+  ctx.lineTo(14, headY - 12);
+  ctx.lineTo(5, headY - 6);
+  ctx.closePath();
+  ctx.fill();
+  // Lazo azul en la cabeza
+  ctx.fillStyle = '#5588cc';
+  ctx.beginPath();
+  ctx.ellipse(-2, headY - 3, 6, 3, -0.3, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.fillStyle = '#4477bb';
+  ctx.beginPath();
+  ctx.arc(-2, headY - 3, 2, 0, Math.PI * 2);
+  ctx.fill();
+
+  // ── Ojos azules grandes (estilo anime) ──
+  // Blanco del ojo izquierdo
+  ctx.fillStyle = 'white';
+  ctx.beginPath();
+  ctx.ellipse(-4.5, headY + 8, 4.5, 5, 0, 0, Math.PI * 2);
+  ctx.fill();
+  // Blanco del ojo derecho
+  ctx.beginPath();
+  ctx.ellipse(4.5, headY + 8, 4.5, 5, 0, 0, Math.PI * 2);
+  ctx.fill();
+  // Iris azul izquierdo
+  const irisGrad1 = ctx.createRadialGradient(-4.5, headY + 7, 0.5, -4.5, headY + 8, 3.5);
+  irisGrad1.addColorStop(0, '#6aB0FF');
+  irisGrad1.addColorStop(0.5, '#3878DD');
+  irisGrad1.addColorStop(1, '#1a4aaa');
+  ctx.fillStyle = irisGrad1;
+  ctx.beginPath();
+  ctx.ellipse(-4.5, headY + 8, 3.5, 4, 0, 0, Math.PI * 2);
+  ctx.fill();
+  // Iris azul derecho
+  const irisGrad2 = ctx.createRadialGradient(4.5, headY + 7, 0.5, 4.5, headY + 8, 3.5);
+  irisGrad2.addColorStop(0, '#6aB0FF');
+  irisGrad2.addColorStop(0.5, '#3878DD');
+  irisGrad2.addColorStop(1, '#1a4aaa');
+  ctx.fillStyle = irisGrad2;
+  ctx.beginPath();
+  ctx.ellipse(4.5, headY + 8, 3.5, 4, 0, 0, Math.PI * 2);
+  ctx.fill();
+  // Pupila izquierda
+  ctx.fillStyle = '#0a1a50';
+  ctx.beginPath();
+  ctx.ellipse(-4.5, headY + 8.5, 1.8, 2.2, 0, 0, Math.PI * 2);
+  ctx.fill();
+  // Pupila derecha
+  ctx.beginPath();
+  ctx.ellipse(4.5, headY + 8.5, 1.8, 2.2, 0, 0, Math.PI * 2);
+  ctx.fill();
+  // Brillo ojo izquierdo
+  ctx.fillStyle = 'rgba(255,255,255,0.95)';
+  ctx.beginPath();
+  ctx.ellipse(-5.5, headY + 6.5, 1.5, 1.5, 0, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.beginPath();
+  ctx.ellipse(-3.5, headY + 9.5, 0.8, 0.8, 0, 0, Math.PI * 2);
+  ctx.fill();
+  // Brillo ojo derecho
+  ctx.beginPath();
+  ctx.ellipse(3.5, headY + 6.5, 1.5, 1.5, 0, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.beginPath();
+  ctx.ellipse(5.5, headY + 9.5, 0.8, 0.8, 0, 0, Math.PI * 2);
+  ctx.fill();
+  // Contorno de ojos (delineado)
+  ctx.strokeStyle = '#1a1a2a';
+  ctx.lineWidth = 1;
+  ctx.beginPath();
+  ctx.ellipse(-4.5, headY + 8, 4.5, 5, 0, 0, Math.PI * 2);
+  ctx.stroke();
+  ctx.beginPath();
+  ctx.ellipse(4.5, headY + 8, 4.5, 5, 0, 0, Math.PI * 2);
+  ctx.stroke();
+  // Pestañas
+  ctx.strokeStyle = '#1a1a2a';
+  ctx.lineWidth = 1.2;
+  // Pestaña izq
+  ctx.beginPath(); ctx.moveTo(-8, headY + 5); ctx.lineTo(-9.5, headY + 3); ctx.stroke();
+  ctx.beginPath(); ctx.moveTo(-5, headY + 4); ctx.lineTo(-5.5, headY + 2); ctx.stroke();
+  ctx.beginPath(); ctx.moveTo(-2, headY + 5); ctx.lineTo(-1.5, headY + 3); ctx.stroke();
+  // Pestaña der
+  ctx.beginPath(); ctx.moveTo(8, headY + 5); ctx.lineTo(9.5, headY + 3); ctx.stroke();
+  ctx.beginPath(); ctx.moveTo(5, headY + 4); ctx.lineTo(5.5, headY + 2); ctx.stroke();
+  ctx.beginPath(); ctx.moveTo(2, headY + 5); ctx.lineTo(1.5, headY + 3); ctx.stroke();
+
+  // Cejas finas
+  ctx.strokeStyle = '#1a3020';
+  ctx.lineWidth = 1.2;
+  ctx.lineCap = 'round';
+  ctx.beginPath();
+  ctx.moveTo(-8, headY + 2); ctx.quadraticCurveTo(-4.5, headY + 0.5, -1, headY + 2);
+  ctx.stroke();
+  ctx.beginPath();
+  ctx.moveTo(8, headY + 2); ctx.quadraticCurveTo(4.5, headY + 0.5, 1, headY + 2);
+  ctx.stroke();
+
+  // Pecas (detalle del personaje de referencia)
+  ctx.fillStyle = 'rgba(180,100,60,0.55)';
+  ctx.beginPath(); ctx.arc(-6, headY + 13, 1, 0, Math.PI * 2); ctx.fill();
+  ctx.beginPath(); ctx.arc(-4, headY + 14.5, 0.8, 0, Math.PI * 2); ctx.fill();
+  ctx.beginPath(); ctx.arc(6, headY + 13, 1, 0, Math.PI * 2); ctx.fill();
+  ctx.beginPath(); ctx.arc(4, headY + 14.5, 0.8, 0, Math.PI * 2); ctx.fill();
+  ctx.beginPath(); ctx.arc(0, headY + 15, 0.8, 0, Math.PI * 2); ctx.fill();
+
+  // Nariz y boca pequeña
+  ctx.fillStyle = '#d4845a';
+  ctx.beginPath(); ctx.arc(0, headY + 13, 1.2, 0, Math.PI * 2); ctx.fill();
+  // Sonrisa chibi
+  ctx.strokeStyle = '#c06040';
+  ctx.lineWidth = 1;
+  ctx.beginPath();
+  ctx.arc(0, headY + 14, 2.5, 0.2, Math.PI - 0.2);
+  ctx.stroke();
+
+  // Mejillas sonrojadas
+  ctx.fillStyle = 'rgba(255,150,130,0.35)';
+  ctx.beginPath(); ctx.ellipse(-9, headY + 12, 5, 3.5, 0.1, 0, Math.PI * 2); ctx.fill();
+  ctx.beginPath(); ctx.ellipse(9, headY + 12, 5, 3.5, -0.1, 0, Math.PI * 2); ctx.fill();
+
+  ctx.restore();
+}
+
+function drawFloatingTexts() {
+  ctx.textAlign = 'center'; ctx.textBaseline = 'alphabetic';
+  for (const ft of floatingTexts) {
+    ctx.globalAlpha = Math.max(0, ft.life);
+    ctx.fillStyle   = ft.color;
+    ctx.font        = 'bold 14px Georgia, serif';
+    ctx.fillText(ft.text, ft.x, ft.y);
+  }
+  ctx.globalAlpha = 1;
+}
+
+function drawScreenFlash() {
+  if (!screenFlash) return;
+  ctx.globalAlpha = screenFlash.alpha;
+  ctx.fillStyle   = screenFlash.color;
+  ctx.fillRect(0, 0, CONFIG.WIDTH, CONFIG.HEIGHT);
+  ctx.globalAlpha = 1;
+}
+
+function drawHeart(x, y, full) {
+  ctx.font = '18px sans-serif'; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+  ctx.fillStyle = full ? CONFIG.COL.LIFE_FULL : CONFIG.COL.LIFE_EMPTY;
+  ctx.fillText('♥', x, y);
+}
+
+/**
+ * HUD expandido.
+ * ── NUEVO Fase 3 ──: muestra el récord debajo del contador de pilares.
+ */
+function drawHUD() {
+  // Pilares
+  ctx.font = 'bold 18px Georgia, serif'; ctx.textAlign = 'left'; ctx.textBaseline = 'alphabetic';
+  ctx.fillStyle = CONFIG.COL.HUD_SHADOW; ctx.fillText(`Obstáculos: ${state.score}`, 17, 37);
+  ctx.fillStyle = CONFIG.COL.HUD_TEXT;   ctx.fillText(`Obstáculos: ${state.score}`, 15, 35);
+
+  // ── Récord ──
+  ctx.font = '12px Georgia, serif';
+  ctx.fillStyle = 'rgba(180,210,255,0.75)';
+  ctx.fillText(`🏆 ${state.record} hierbas`, 15, 55);
+
+  // Vidas
+  for (let i = 0; i < CONFIG.MAX_LIVES; i++) {
+    drawHeart(CONFIG.WIDTH - 20 - i * 24, 25, i < state.lives);
+  }
+
+  // Hierbas
+  ctx.font = 'bold 15px Georgia, serif'; ctx.textAlign = 'right';
+  ctx.fillStyle = CONFIG.COL.HUD_SHADOW;
+  ctx.fillText(`🌿 ${state.herbs} / ${CONFIG.HERBS_TO_WIN}`, CONFIG.WIDTH - 10, 52);
+  ctx.fillStyle = '#a5d6a7';
+  ctx.fillText(`🌿 ${state.herbs} / ${CONFIG.HERBS_TO_WIN}`, CONFIG.WIDTH - 11, 51);
+
+  // Barra de progreso
+  const barW = 100, barH = 6, barX = CONFIG.WIDTH - barW - 10, barY = 56;
+  const fill = (state.herbs / CONFIG.HERBS_TO_WIN) * barW;
+  ctx.fillStyle = 'rgba(0,0,0,0.4)';
+  ctx.beginPath(); ctx.roundRect(barX, barY, barW, barH, 3); ctx.fill();
+  if (fill > 0) {
+    const barGrad = ctx.createLinearGradient(barX, 0, barX + barW, 0);
+    barGrad.addColorStop(0, '#4caf50'); barGrad.addColorStop(1, '#a5d6a7');
+    ctx.fillStyle = barGrad;
+    ctx.beginPath(); ctx.roundRect(barX, barY, fill, barH, 3); ctx.fill();
+  }
+}
+
+/** Pantalla de inicio */
+function drawIdleScreen() {
+  ctx.fillStyle = 'rgba(2,8,30,0.85)';
+  ctx.fillRect(40, 175, 400, 290);
+  ctx.strokeStyle = '#4488dd'; ctx.lineWidth = 2;
+  ctx.strokeRect(40, 175, 400, 290);
+
+  ctx.textAlign = 'center'; ctx.textBaseline = 'alphabetic';
+
+  ctx.fillStyle = '#88bbff';
+  ctx.font = 'bold 36px Georgia, serif';
+  ctx.fillText('Flappy Kiro', CONFIG.WIDTH / 2, 233);
+
+  ctx.fillStyle = CONFIG.COL.HUD_TEXT;
+  ctx.font = '13px Georgia, serif';
+  ctx.fillText('La aprendiz de botica vuela', CONFIG.WIDTH / 2, 263);
+  ctx.fillText('a través del palacio imperial', CONFIG.WIDTH / 2, 282);
+
+  ctx.font = '13px Georgia, serif';
+  ctx.fillStyle = '#a5d6a7'; ctx.fillText('🌿  Recoge 10 hierbas → completas la poción', CONFIG.WIDTH / 2, 312);
+  ctx.fillStyle = '#ce93d8'; ctx.fillText('☠  Evita los frascos de veneno',             CONFIG.WIDTH / 2, 332);
+  ctx.fillStyle = CONFIG.COL.LIFE_FULL; ctx.fillText('♥ ♥ ♥  Tienes 3 vidas',           CONFIG.WIDTH / 2, 352);
+
+  // ── Récord ──
+  if (state.record > 0) {
+    ctx.fillStyle = 'rgba(180,210,255,0.9)';
+    ctx.font = 'bold 13px Georgia, serif';
+    ctx.fillText(`🏆 Récord: ${state.record} hierbas`, CONFIG.WIDTH / 2, 375);
+  }
+
+  ctx.fillStyle = '#88bbff';
+  ctx.font = 'bold 16px Georgia, serif';
+  ctx.fillText('▶  Presiona Espacio para empezar', CONFIG.WIDTH / 2, 410);
+  ctx.fillStyle = CONFIG.COL.HUD_TEXT;
+  ctx.font = '12px Georgia, serif';
+  ctx.fillText('(también clic o toque en pantalla)', CONFIG.WIDTH / 2, 432);
+}
+
+/** Pantalla de game over */
+function drawDeadScreen() {
+  ctx.fillStyle = 'rgba(2,8,30,0.88)';
+  ctx.fillRect(40, 175, 400, 290);
+  ctx.strokeStyle = '#8b0000'; ctx.lineWidth = 2;
+  ctx.strokeRect(40, 175, 400, 290);
+
+  ctx.textAlign = 'center'; ctx.textBaseline = 'alphabetic';
+
+  ctx.fillStyle = '#e05050';
+  ctx.font = 'bold 34px Georgia, serif';
+  ctx.fillText('✦ Sin vidas ✦', CONFIG.WIDTH / 2, 233);
+
+  ctx.fillStyle = CONFIG.COL.HUD_TEXT;
+  ctx.font = '15px Georgia, serif';
+  ctx.fillText(`Obstáculos superados: ${state.score}`,                        CONFIG.WIDTH / 2, 268);
+  ctx.fillStyle = '#a5d6a7';
+  ctx.fillText(`Hierbas recolectadas: ${state.herbs} / ${CONFIG.HERBS_TO_WIN}`, CONFIG.WIDTH / 2, 293);
+
+  // ── Récord ──
+  if (state.newRecord && state.herbs > 0) {
+    ctx.fillStyle = '#aaddff';
+    ctx.font = 'bold 15px Georgia, serif';
+    ctx.fillText('🏆 ¡Nuevo récord!', CONFIG.WIDTH / 2, 320);
+  } else if (state.record > 0) {
+    ctx.fillStyle = 'rgba(180,210,255,0.75)';
+    ctx.font = '13px Georgia, serif';
+    ctx.fillText(`🏆 Récord: ${state.record} hierbas`, CONFIG.WIDTH / 2, 320);
+  }
+
+  for (let i = 0; i < CONFIG.MAX_LIVES; i++) {
+    drawHeart(CONFIG.WIDTH / 2 - 24 + i * 24, 345, false);
+  }
+
+  ctx.fillStyle = '#88bbff';
+  ctx.font = 'bold 15px Georgia, serif';
+  ctx.fillText('▶  Presiona Espacio para reiniciar', CONFIG.WIDTH / 2, 395);
+  ctx.fillStyle = CONFIG.COL.HUD_TEXT;
+  ctx.font = '12px Georgia, serif';
+  ctx.fillText('(también clic o toque en pantalla)', CONFIG.WIDTH / 2, 418);
+}
+
+/** Pantalla de victoria */
+function drawWinScreen() {
+  ctx.fillStyle = 'rgba(2,15,8,0.88)';
+  ctx.fillRect(40, 160, 400, 320);
+  ctx.strokeStyle = '#4caf50'; ctx.lineWidth = 2;
+  ctx.strokeRect(40, 160, 400, 320);
+
+  ctx.textAlign = 'center'; ctx.textBaseline = 'alphabetic';
+
+  ctx.fillStyle = '#a5d6a7';
+  ctx.font = 'bold 28px Georgia, serif';
+  ctx.fillText('✦ ¡Poción completada! ✦', CONFIG.WIDTH / 2, 213);
+
+  ctx.fillStyle = CONFIG.COL.HUD_TEXT;
+  ctx.font = '13px Georgia, serif';
+  ctx.fillText('La aprendiz reunió todos los ingredientes', CONFIG.WIDTH / 2, 245);
+  ctx.fillText('y preparó el remedio del palacio.',         CONFIG.WIDTH / 2, 264);
+
+  ctx.fillStyle = '#aaddff';
+  ctx.font = 'bold 14px Georgia, serif';
+  ctx.fillText(`Obstáculos superados: ${state.score}`, CONFIG.WIDTH / 2, 295);
+  ctx.fillStyle = CONFIG.COL.LIFE_FULL;
+  ctx.fillText(`Vidas restantes: ${state.lives}`,    CONFIG.WIDTH / 2, 316);
+
+  // ── Récord ──
+  if (state.newRecord) {
+    ctx.fillStyle = '#aaddff';
+    ctx.font = 'bold 15px Georgia, serif';
+    ctx.fillText('🏆 ¡Nuevo récord de hierbas!', CONFIG.WIDTH / 2, 340);
+  } else if (state.record > 0) {
+    ctx.fillStyle = 'rgba(180,210,255,0.8)';
+    ctx.font = '13px Georgia, serif';
+    ctx.fillText(`🏆 Récord: ${state.record} hierbas`, CONFIG.WIDTH / 2, 340);
+  }
+
+  const heartStart = CONFIG.WIDTH / 2 - (CONFIG.MAX_LIVES - 1) * 12;
+  for (let i = 0; i < CONFIG.MAX_LIVES; i++) {
+    drawHeart(heartStart + i * 24, 360, i < state.lives);
+  }
+
+  drawPotionIcon(CONFIG.WIDTH / 2, 392);
+
+  ctx.fillStyle = '#88bbff';
+  ctx.font = 'bold 14px Georgia, serif';
+  ctx.fillText('▶  Presiona Espacio para jugar de nuevo', CONFIG.WIDTH / 2, 440);
+  ctx.fillStyle = CONFIG.COL.HUD_TEXT;
+  ctx.font = '12px Georgia, serif';
+  ctx.fillText('(también clic o toque en pantalla)', CONFIG.WIDTH / 2, 460);
+}
+
+/** Icono de poción en victoria */
+function drawPotionIcon(cx, cy) {
+  ctx.save(); ctx.translate(cx, cy);
+  ctx.fillStyle = '#1b5e20';
+  ctx.beginPath(); ctx.roundRect(-14, -16, 28, 28, 8); ctx.fill();
+  ctx.fillStyle = '#4caf50';
+  ctx.beginPath(); ctx.roundRect(-10, -4, 20, 16, 6); ctx.fill();
+  ctx.fillStyle = 'rgba(255,255,255,0.3)';
+  ctx.beginPath(); ctx.ellipse(-5, -8, 4, 6, -0.3, 0, Math.PI * 2); ctx.fill();
+  ctx.fillStyle = '#2e7d32'; ctx.fillRect(-5, -24, 10, 10);
+  ctx.fillStyle = '#c47a20';
+  ctx.beginPath(); ctx.roundRect(-6, -28, 12, 6, 2); ctx.fill();
+  ctx.restore();
+}
+
+/** Frame completo */
+function render() {
+  // drawBackground ya incluye cielo + capa0 + capa1
+  drawBackground();
+  drawPillars();
+  // Capa 2 (bambú) va encima de los pilares pero detrás del jugador
+  drawParallaxLayer2();
+  drawItems();
+  drawGround();
+  drawPlayer();
+  drawFloatingTexts();
+  drawScreenFlash();
+  drawHUD();
+
+  if (state.phase === 'idle') drawIdleScreen();
+  if (state.phase === 'dead') drawDeadScreen();
+  if (state.phase === 'win')  drawWinScreen();
+}
+
+
+/* ────────────────────────────────────────────────────────────────
+   12. GAME LOOP
+   ──────────────────────────────────────────────────────────────── */
+
+function gameLoop() {
+  if (state.phase === 'playing') {
+    state.frameCount++;
+
+    updatePhysics();
+    updatePillars();
+    if (state.frameCount % CONFIG.PILLAR_INTERVAL === 0) spawnPillar();
+
+    updateItems();
+    updateInvuln();
+    updateFloatingTexts();
+    updateScreenFlash();
+
+    // ── NUEVO Fase 3 ──
+    updateParallax();   // mover capas de fondo
+
+    checkScore();
+    checkCollisions();
+    if (state.phase === 'playing') checkItemCollisions();
+
+  } else if (state.phase === 'idle') {
+    // En idle también animamos el parallax para ver el fondo en movimiento
+    updateParallax();
+  }
+
+  render();
+  requestAnimationFrame(gameLoop);
+}
+
+
+/* ────────────────────────────────────────────────────────────────
+   13. INICIALIZACIÓN
+   ──────────────────────────────────────────────────────────────── */
+
+function resetGame() {
+  player.x = CONFIG.PLAYER_X;
+  player.y = CONFIG.HEIGHT / 2 - CONFIG.PLAYER_H / 2;
+  player.vy = 0; player.wobble = 0;
+
+  pillarList = []; itemList = []; floatingTexts = []; screenFlash = null;
+
+  state.score      = 0;
+  state.speed      = CONFIG.PILLAR_SPEED;
+  state.frameCount = 0;
+  state.lives      = CONFIG.MAX_LIVES;
+  state.herbs      = 0;
+  state.invuln     = 0;
+  state.newRecord  = false;
+  state.phase      = 'playing';
+}
+
+function startGame() {
+  resetGame();
+}
+
+// ── Arranque ──
+loadRecord();       // cargar récord guardado
+initParallax();     // generar elementos decorativos de las capas
+requestAnimationFrame(gameLoop);
+</script>
+
+<!--
+  ════════════════════════════════════════════════════════════════
+  GUÍA RÁPIDA DEL CÓDIGO – FASE 3
+  ════════════════════════════════════════════════════════════════
+
+  NOVEDADES RESPECTO A FASE 2:
+
+  A. PARALLAX DE TRES CAPAS (initParallax, updateParallax, drawParallaxLayerX)
+     El efecto parallax simula profundidad moviendo capas a distintas
+     velocidades:
+       Capa 0 (vel 0.3) – tejados lejanos del palacio: triángulos
+         oscuros con líneas de cumbrera.
+       Capa 1 (vel 0.8) – paredes y linternas del palacio: rectángulos
+         con tejado triangular, ventanas circulares y linternas que
+         balancean con Math.sin().
+       Capa 2 (vel 1.4) – bambú del jardín: tallos con nudos y hojitas
+         en la punta, en primer plano.
+
+     Técnica de wrap-around: cada capa tiene un offset que crece cada
+     frame. Cuando supera WIDTH*2 vuelve a 0. Los elementos se dibujan
+     dos veces (offset y offset-totalWidth) para que no haya "saltos"
+     al hacer el wrap.
+
+     La animación también corre en estado 'idle' para que la pantalla
+     de inicio luzca animada.
+
+  B. SONIDOS (Web Audio API — sección 4)
+     No hay archivos de audio; todo se sintetiza al momento con
+     osciladores. Cada acción tiene su propio timbre:
+       salto     → chirp ascendente (sine, 320→520 Hz)
+       hierba    → dos notas alegres (sine, 520+780 Hz)
+       daño      → descenso brusco  (square, 300→80 Hz)
+       game over → tres golpes graves (square)
+       victoria  → fanfarria C-E-G-C  (triangle)
+       score     → tick discreto       (triangle, 440 Hz)
+       récord    → escala ascendente   (sine, 5 notas)
+
+     AudioContext se crea en el primer gesto del usuario para cumplir
+     la política de autoplay de los navegadores modernos.
+
+  C. RÉCORD EN localStorage (loadRecord, saveRecord)
+     localStorage es un almacén clave-valor del navegador que persiste
+     entre recargas de página y cierres del navegador.
+     Al abrir el juego, loadRecord() lee el valor guardado.
+     Al terminar una partida (victoria o game over), saveRecord()
+     compara state.herbs con state.record y guarda si es mayor.
+     El récord se muestra en el HUD, en la pantalla de inicio y en las
+     pantallas de fin de partida.
+
+  FLUJO COMPLETO:
+    idle (parallax animado) →
+    playing (física + pilares + ítems + sonidos + parallax) →
+    dead / win (overlay con récord, sonido, opción reinicio)
+
+  ════════════════════════════════════════════════════════════════
+-->
+</body>
+</html>
